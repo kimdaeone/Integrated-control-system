@@ -1,0 +1,7 @@
+<Project>
+<PropertyGroup>
+  <OutputType>WinExe</OutputType>
+  <TargetFramework>net8.0-windows</TargetFramework>
+  <Nullable>enable</Nullable>
+</PropertyGroup>
+</Project>
