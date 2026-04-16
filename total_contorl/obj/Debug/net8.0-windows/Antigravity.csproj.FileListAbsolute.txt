@@ -1,0 +1,14 @@
+D:\Antigravity\total_contorl\bin\Debug\net8.0-windows\Antigravity.exe
+D:\Antigravity\total_contorl\bin\Debug\net8.0-windows\Antigravity.deps.json
+D:\Antigravity\total_contorl\bin\Debug\net8.0-windows\Antigravity.runtimeconfig.json
+D:\Antigravity\total_contorl\bin\Debug\net8.0-windows\Antigravity.dll
+D:\Antigravity\total_contorl\bin\Debug\net8.0-windows\Antigravity.pdb
+D:\Antigravity\total_contorl\obj\Debug\net8.0-windows\Antigravity.GeneratedMSBuildEditorConfig.editorconfig
+D:\Antigravity\total_contorl\obj\Debug\net8.0-windows\Antigravity.AssemblyInfoInputs.cache
+D:\Antigravity\total_contorl\obj\Debug\net8.0-windows\Antigravity.AssemblyInfo.cs
+D:\Antigravity\total_contorl\obj\Debug\net8.0-windows\Antigravity.csproj.CoreCompileInputs.cache
+D:\Antigravity\total_contorl\obj\Debug\net8.0-windows\Antigravity.dll
+D:\Antigravity\total_contorl\obj\Debug\net8.0-windows\refint\Antigravity.dll
+D:\Antigravity\total_contorl\obj\Debug\net8.0-windows\Antigravity.pdb
+D:\Antigravity\total_contorl\obj\Debug\net8.0-windows\Antigravity.genruntimeconfig.cache
+D:\Antigravity\total_contorl\obj\Debug\net8.0-windows\ref\Antigravity.dll

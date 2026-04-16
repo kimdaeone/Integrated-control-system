@@ -1,85 +1,123 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
 using System.Text.Json.Serialization;
 
 namespace GmnPlayer.Models
 {
-    /// <summary>
-    /// 시스템 전반의 프로젝트 설정 모델
-    /// </summary>
     public class ProjectConfig
     {
-        /// <summary>
-        /// 프로젝트의 고유 ID
-        /// </summary>
+        [Category("General")]
+        [DisplayName("Project ID")]
         [JsonPropertyName("projectId")]
         public string ProjectId { get; set; } = "default_project";
 
-        /// <summary>
-        /// 프로젝트에 속한 기기 노드들의 리스트
-        /// </summary>
+        [Category("Appearance")]
+        [DisplayName("Resolution Width")]
+        [JsonPropertyName("resolutionWidth")]
+        public int ResolutionWidth { get; set; } = 1920;
+
+        [Category("Appearance")]
+        [DisplayName("Resolution Height")]
+        [JsonPropertyName("resolutionHeight")]
+        public int ResolutionHeight { get; set; } = 1080;
+
+        [Category("Appearance")]
+        [DisplayName("Background Color Hex")]
+        [JsonPropertyName("backgroundColor")]
+        public string BackgroundColor { get; set; } = "#191919";
+
+        [Browsable(false)]
         [JsonPropertyName("deviceNodes")]
         public List<DeviceNode> DeviceNodes { get; set; } = new List<DeviceNode>();
 
-        /// <summary>
-        /// 화면에 배치될 UI 컨트롤들의 리스트
-        /// </summary>
-        [JsonPropertyName("uiControls")]
-        public List<UIControl> UIControls { get; set; } = new List<UIControl>();
+        [JsonPropertyName("widgets")]
+        public List<WidgetModel> Widgets { get; set; } = new List<WidgetModel>();
         
-        /// <summary>
-        /// 배경 이미지 경로
-        /// </summary>
+        [Category("Appearance")]
+        [DisplayName("Background Image Path")]
+        [Editor(typeof(System.Windows.Forms.Design.FileNameEditor), typeof(System.Drawing.Design.UITypeEditor))]
         [JsonPropertyName("backgroundImagePath")]
         public string BackgroundImagePath { get; set; } = string.Empty;
+
+        [JsonPropertyName("presets")]
+        public List<PresetState> Presets { get; set; } = new List<PresetState>();
     }
 
-    /// <summary>
-    /// 하네스 기반 통신 및 제어 기기 모델. IDevice 호환 목적 설계.
-    /// </summary>
+    public enum WidgetType
+    {
+        Button,
+        GridCanvas,
+        SourceList,
+        LayoutChanger,
+        PresetMinimap
+    }
+
+    public class SourceItemNode
+    {
+        [JsonPropertyName("id")]
+        public string Id { get; set; } = string.Empty;
+
+        [JsonPropertyName("alias")]
+        public string Alias { get; set; } = string.Empty;
+    }
+
     public class DeviceNode
     {
-        /// <summary>
-        /// 기기 ID
-        /// </summary>
+        [Category("Identity")]
+        [DisplayName("Device ID")]
+        [Description("Unique identifier for the generic device mapping.")]
         [JsonPropertyName("deviceId")]
         public string DeviceId { get; set; } = "unknown_device";
 
-        /// <summary>
-        /// 기기 IP 주소
-        /// </summary>
+        [Category("Network")]
+        [DisplayName("IP Address")]
+        [RegularExpression(@"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$", ErrorMessage = "Invalid IP Address format.")]
         [JsonPropertyName("ipAddress")]
         public string IpAddress { get; set; } = "127.0.0.1";
 
-        /// <summary>
-        /// 접속 포트 번호. 잘못된 값이 들어오지 않도록 방어.
-        /// </summary>
         private int _port = 8080;
+        
+        [Category("Network")]
+        [DisplayName("Port Number")]
+        [Range(0, 65535, ErrorMessage = "Port must be bounded between 0 and 65535")]
         [JsonPropertyName("port")]
         public int Port
         {
             get => _port;
             set => _port = (value > 0 && value <= 65535) ? value : 8080;
         }
+
+        [Category("Hardware")]
+        [DisplayName("Protocol Strategy")]
+        [Description("Available Strategies: AVCIT, RS232, GenericTcp")]
+        [JsonPropertyName("protocolStrategy")]
+        public string ProtocolStrategy { get; set; } = "GenericTcp";
     }
 
-    /// <summary>
-    /// 화면에 그려질 동적 UI 컨트롤의 모델 클래스
-    /// 음수나 논리적으로 맞지 않는 좌표값 방어를 위한 Get/Set 적용
-    /// </summary>
-    public class UIControl
+    public class WidgetModel
     {
-        /// <summary>
-        /// 컨트롤의 고유 식별자
-        /// </summary>
+        [Category("General")]
+        [ReadOnly(true)]
         [JsonPropertyName("id")]
         public string Id { get; set; } = Guid.NewGuid().ToString();
 
+        [Category("General")]
+        [DisplayName("Component Type")]
+        [ReadOnly(true)] // 동결 처리
+        [JsonPropertyName("type")]
+        public WidgetType Type { get; set; } = WidgetType.Button;
+
+        [Category("Visual")]
+        [DisplayName("Image Asset Path")]
+        [Editor(typeof(System.Windows.Forms.Design.FileNameEditor), typeof(System.Drawing.Design.UITypeEditor))]
+        [JsonPropertyName("imagePath")]
+        public string ImagePath { get; set; } = string.Empty;
+
         private int _x;
-        /// <summary>
-        /// X 좌표 (항상 0 이상)
-        /// 방어적 코딩: 음수 입력 시 기본값 0으로 복구하여 Crash 방지
-        /// </summary>
+        [Category("Transform")]
+        [DisplayName("X Position")]
         [JsonPropertyName("x")]
         public int X
         {
@@ -88,10 +126,8 @@ namespace GmnPlayer.Models
         }
 
         private int _y;
-        /// <summary>
-        /// Y 좌표 (항상 0 이상)
-        /// 방어적 코딩: 음수 입력 시 기본값 0으로 복구하여 Crash 방지
-        /// </summary>
+        [Category("Transform")]
+        [DisplayName("Y Position")]
         [JsonPropertyName("y")]
         public int Y
         {
@@ -100,10 +136,8 @@ namespace GmnPlayer.Models
         }
 
         private int _w = 100;
-        /// <summary>
-        /// 너비 (최소 크기 10 보장)
-        /// 방어적 코딩: 비정상적인 작은 값 또는 음수 입력 시 최소 10 유지
-        /// </summary>
+        [Category("Transform")]
+        [DisplayName("Width (W)")]
         [JsonPropertyName("w")]
         public int W
         {
@@ -112,10 +146,8 @@ namespace GmnPlayer.Models
         }
 
         private int _h = 100;
-        /// <summary>
-        /// 높이 (최소 크기 10 보장)
-        /// 방어적 코딩: 비정상적인 작은 값 또는 음수 입력 시 최소 10 유지
-        /// </summary>
+        [Category("Transform")]
+        [DisplayName("Height (H)")]
         [JsonPropertyName("h")]
         public int H
         {
@@ -123,28 +155,70 @@ namespace GmnPlayer.Models
             set => _h = Math.Max(10, value);
         }
 
-        /// <summary>
-        /// 명령을 수신할 제어 장비의 아이디 (ID)
-        /// </summary>
-        [JsonPropertyName("targetDeviceId")]
-        public string TargetDeviceId { get; set; } = string.Empty;
-
-        /// <summary>
-        /// 해당 컨트롤과 매핑된 제어 명령 (예: "POWER_ON", "VOLUME_UP")
-        /// </summary>
-        [JsonPropertyName("command")]
-        public string Command { get; set; } = string.Empty;
-
-        /// <summary>
-        /// 화면 상의 레이어 높이 (Z-Index)
-        /// </summary>
+        [Category("Visual")]
+        [DisplayName("Z-Index Overlap")]
         [JsonPropertyName("zIndex")]
         public int ZIndex { get; set; } = 0;
 
-        /// <summary>
-        /// 패널 객체를 생성하지 않고 Paint에서 가이드라인/배경으로 렌더링될 정적 요소 여부
-        /// </summary>
+        [Category("Behavior")]
+        [DisplayName("Is Static Guide")]
         [JsonPropertyName("isStatic")]
         public bool IsStatic { get; set; } = false;
+
+        [Category("Mapping")]
+        [DisplayName("Target Device ID")]
+        [Description("Which device captures the interaction commands mapping.")]
+        [JsonPropertyName("targetDeviceId")]
+        public string TargetDeviceId { get; set; } = string.Empty;
+
+        [Category("Mapping")]
+        [DisplayName("Execution Command")]
+        [JsonPropertyName("command")]
+        public string Command { get; set; } = string.Empty;
+
+        [Category("Grid Constraints")]
+        [DisplayName("Is Grid Dependent")]
+        [JsonPropertyName("isGridDependent")]
+        public bool IsGridDependent { get; set; } = false;
+
+        [Category("Grid Constraints")]
+        [DisplayName("Internal Cell Row")]
+        [JsonPropertyName("cellRow")]
+        public int CellRow { get; set; } = 0;
+
+        [Category("Grid Constraints")]
+        [DisplayName("Internal Cell Col")]
+        [JsonPropertyName("cellCol")]
+        public int CellCol { get; set; } = 0;
+
+        [Category("Engine Rules")]
+        [DisplayName("Grid Rows (N)")]
+        [JsonPropertyName("gridRows")]
+        public int GridRows { get; set; } = 2; // Default 2
+
+        [Category("Engine Rules")]
+        [DisplayName("Grid Cols (M)")]
+        [JsonPropertyName("gridCols")]
+        public int GridCols { get; set; } = 4; // Default 4
+
+        [Category("Engine Rules")]
+        [DisplayName("Source Entries")]
+        [JsonPropertyName("sourceItems")]
+        public List<SourceItemNode> SourceItems { get; set; } = new List<SourceItemNode>();
+    }
+
+    public class PresetState
+    {
+        [JsonPropertyName("presetId")]
+        public string PresetId { get; set; } = Guid.NewGuid().ToString();
+
+        [JsonPropertyName("name")]
+        public string Name { get; set; } = "Scenario Preset";
+
+        [JsonPropertyName("deviceCommands")]
+        public Dictionary<string, string> DeviceCommands { get; set; } = new Dictionary<string, string>();
+
+        [JsonPropertyName("gridMappings")]
+        public Dictionary<string, string> GridMappings { get; set; } = new Dictionary<string, string>();
     }
 }

@@ -1,0 +1,33 @@
+{
+  "projectId": "PRJ_SYS01",
+  "deviceNodes": [
+    {
+      "deviceId": "DEV_01",
+      "ipAddress": "127.0.0.1",
+      "port": 5000,
+      "protocolStrategy": "AVCIT"
+    }
+  ],
+  "widgets": [
+    {
+      "id": "grid_did_01",
+      "type": 1,
+      "x": 200,
+      "y": 100,
+      "w": 450,
+      "h": 300,
+      "zIndex": 2,
+      "isStatic": false,
+      "targetDeviceId": "DEV_01",
+      "command": "",
+      "isGridDependent": false,
+      "cellRow": 0,
+      "cellCol": 0,
+      "gridRows": 2,
+      "gridCols": 3,
+      "sourceItems": []
+    }
+  ],
+  "backgroundImagePath": "",
+  "presets": []
+}

@@ -1,334 +1,832 @@
 using System;
-using System.Collections.Generic;
 using System.Drawing;
-using System.IO;
-using System.Linq;
 using System.Text.Json;
+using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Collections.Generic;
 using GmnPlayer.Models;
+using GmnPlayer.Managers;
+using System.Linq;
 
-namespace GmnPlayer.Engine
+namespace GmnPlayer.UI
 {
-    /// <summary>
-    /// 동적으로 UI 컨트롤을 생성하고 배치하는 레이아웃 엔진 엔진 클래스
-    /// </summary>
-    public class LayoutEngine : Form
+    public partial class LayoutEngine : Form
     {
-        private DoubleBufferedPanel _canvasPanel;
-        private Image? _backgroundImage;
-        private List<UIControl> _staticControls = new List<UIControl>();
+        public enum EngineMode { Designer, Player }
+        public EngineMode CurrentMode { get; private set; }
 
-        /// <summary>
-        /// Gmn-Player 화면의 기준이 되는 캔버스 패널을 반환합니다.
-        /// </summary>
-        public Panel Canvas => _canvasPanel;
+        private MenuStrip? _menuStrip;
+        private ToolStrip? _toolStrip;
+        private SplitContainer? _workspaceSplit;
+        private SplitContainer? _canvasSplit;
+        private TreeView? _treeView;
+        private PropertyGrid? _propertyGrid;
+        private Panel _canvasPanel = new Panel();
+        private Button? _btnIdentify;
 
-        /// <summary>
-        /// 레이아웃 엔진 생성자
-        /// </summary>
-        public LayoutEngine()
+        // Interaction Engine
+        private Control? _selectedControl;
+        private List<Panel> _resizeHandles = new List<Panel>();
+        private bool _isDragging = false;
+        private Point _dragStartCursor;
+        private Point _dragStartLocation;
+        
+        private bool _isResizing = false;
+        private int _resizeHandleIndex = -1;
+        private Rectangle _resizeStartBounds;
+
+        // Undo & Productivity Engine
+        private List<string> _undoStack = new List<string>();
+        private List<WidgetModel> _clipboard = new List<WidgetModel>();
+
+        public LayoutEngine(EngineMode mode = EngineMode.Player)
         {
-            _canvasPanel = new DoubleBufferedPanel
+            CurrentMode = mode;
+            this.Text = CurrentMode == EngineMode.Designer ? "Gmn-Player v4.3.1 [Designer Workspace]" : "Gmn-Player v4.3.1 [Operator Dashboard]";
+            this.Size = new Size(1366, 768);
+            this.BackColor = Color.FromArgb(20, 20, 20);
+            this.DoubleBuffered = true;
+            this.KeyPreview = true;
+            this.KeyDown += LayoutEngine_KeyDown;
+
+            InitializeUI();
+
+            this.Load += (s, e) =>
             {
-                Dock = DockStyle.Fill,
-                BackColor = Color.DarkGray
+                // [BUG FIX 1] 빈 상태일 경우 확실하게 메모리 인스턴스를 만들고 전역(CurrentProject)에 장착함.
+                if (ProjectManager.Instance.CurrentProject == null)
+                {
+                    var config = new ProjectConfig { ProjectId = "PRJ_SYS01" };
+                    config.DeviceNodes.Add(new DeviceNode { DeviceId = "DEV_01", IpAddress = "127.0.0.1", Port = 5000, ProtocolStrategy = "AVCIT" });
+                    config.Widgets.Add(new WidgetModel { Id = "grid_did_01", Type = WidgetType.GridCanvas, TargetDeviceId = "DEV_01", X = 200, Y = 100, W = 450, H = 300, ZIndex = 2, GridRows = 2, GridCols = 3 });
+                    
+                    ProjectManager.Instance.CurrentProject = config; // 핵심 결함 수리 완료
+                    ProjectManager.Instance.SaveProject("default.gmn");
+                }
+                
+                string json = JsonSerializer.Serialize(ProjectManager.Instance.CurrentProject);
+                LoadLayoutFromJson(json);
+                DeselectAll(); // Trigger ProjectConfig binding on init
+                
+                // Identify 통신 엔진 초기 구성 배선 (이제 CurrentProject가 무조건 있으므로 안전함)
+                DeviceManager.Instance.InitializeFromConfig(ProjectManager.Instance.CurrentProject!);
             };
-            
-            // 리사이즈 이벤트 시 배경 이미지와 화면 비율을 조정
-            _canvasPanel.Paint += CanvasPanel_Paint;
-            _canvasPanel.Resize += CanvasPanel_Resize;
-
-            this.Controls.Add(_canvasPanel);
-            
-            // 강제 자동 렌더링
-            this.Load += (s, e) => LoadMockProject();
         }
 
-        /// <summary>
-        /// JSON 문자열을 파싱하여 동적으로 레이아웃과 데이터 모델을 불러와 캔버스에 배치합니다.
-        /// </summary>
-        /// <param name="jsonConfig">JSON 포맷의 문자열 설정 객체</param>
-        public void LoadLayoutFromJson(string jsonConfig)
+        private void InitializeUI()
         {
-            if (_canvasPanel.InvokeRequired)
+            _canvasPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(25, 25, 25) };
+            _canvasPanel.MouseDown += (s, e) => DeselectAll();
+
+            if (CurrentMode == EngineMode.Designer)
             {
-                _canvasPanel.BeginInvoke(new Action(() => LoadLayoutFromJson(jsonConfig)));
-                return;
-            }
+                // [BUG FIX 4] 최상단 MenuStrip 강제 부활.
+                _menuStrip = new MenuStrip { Dock = DockStyle.Top, BackColor = Color.FromArgb(30, 30, 30), ForeColor = Color.LightGray };
+                
+                var fileMenu = new ToolStripMenuItem("File");
+                fileMenu.DropDownItems.Add(new ToolStripMenuItem("Save Project (.gmn)", null, (s,e) => { ProjectManager.Instance.SaveProject(); MessageBox.Show("Project Saved.", "Info"); }) { ShortcutKeys = Keys.Control | Keys.S });
+                fileMenu.DropDownItems.Add(new ToolStripMenuItem("Exit", null, (s,e) => Application.Exit()));
+                
+                var editMenu = new ToolStripMenuItem("Edit");
+                editMenu.DropDownItems.Add(new ToolStripMenuItem("Undo Action", null, (s,e) => PerformUndo()) { ShortcutKeys = Keys.Control | Keys.Z });
+                
+                _menuStrip.Items.Add(fileMenu); _menuStrip.Items.Add(editMenu);
+                this.MainMenuStrip = _menuStrip;
 
-            if (string.IsNullOrWhiteSpace(jsonConfig)) return;
+                // ToolStrip 컴팩트 메뉴
+                _toolStrip = new ToolStrip { Dock = DockStyle.Top, Height = 50, AutoSize = false, BackColor = Color.FromArgb(45, 45, 48), ForeColor = Color.White, GripStyle = ToolStripGripStyle.Hidden, Padding = new Padding(10, 5, 0, 5) };
+                
+                var lblAdd = new ToolStripLabel("Add Widget:");
+                lblAdd.Font = new Font("Arial", 9, FontStyle.Bold);
+                _toolStrip.Items.Add(lblAdd); _toolStrip.Items.Add(new ToolStripSeparator());
 
-            try
-            {
-                var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-                var config = JsonSerializer.Deserialize<ProjectConfig>(jsonConfig, options);
-
-                if (config == null) return;
-
-                // 캔버스 초기화
-                ClearCanvas();
-
-                // 1. 역동적 이미지 로드 및 배경 설정 (방어적 예외 처리 반영)
-                LoadImageSafely(config.BackgroundImagePath);
-
-                // 2. 에러가 포함되어도 시스템 크래시를 방어하기 위한 안전한 ZIndex 정렬
-                var sortedControls = config.UIControls.OrderBy(c => c.ZIndex).ToList();
-
-                // 3. UI 컨트롤 생성 (동적 배치)
-                // 최적화: SuspendLayout을 통해 렌더링 부하 최소화 및 배치 갱신 최적화
-                _canvasPanel.SuspendLayout();
-                int dynamicControlCount = 0;
-                foreach (var ctlInfo in sortedControls)
+                foreach(WidgetType wt in Enum.GetValues(typeof(WidgetType)))
                 {
-                    if (ctlInfo.IsStatic)
-                    {
-                        _staticControls.Add(ctlInfo);
-                    }
-                    else
-                    {
-                        dynamicControlCount++;
-                        if (dynamicControlCount > 500)
-                        {
-                            throw new System.ComponentModel.Win32Exception("GDI Handle Protection: 동적 생성 컨트롤 개수가 500개를 초과했습니다. 시스템 안정성을 위해 생성을 중단합니다.");
-                        }
-                        CreateAndPlaceControl(ctlInfo);
-                    }
+                    var btn = new ToolStripButton($"  + {wt}  ") { DisplayStyle = ToolStripItemDisplayStyle.Text };
+                    btn.Click += (s, e) => AddWidgetFromPalette(wt);
+                    _toolStrip.Items.Add(btn);
                 }
-                _canvasPanel.ResumeLayout(true);
-            }
-            catch (JsonException ex)
-            {
-                // 잘못된 JSON 구조로 인한 크래시 발생 시 빈화면으로 복구
-                Console.WriteLine($"Layout Load Parsing Error: {ex.Message}");
-                ClearCanvas();
-            }
-            catch (Exception ex)
-            {
-                // 실패시 크래시 방지 및 기본화면 복구 처리
-                Console.WriteLine($"Layout Loading Failed: {ex.Message}");
-                ClearCanvas();
-            }
-        }
 
-        /// <summary>
-        /// 배경 이미지를 메모리에 단독 상주시켜 파일 병목(File Lock) 회피 구조 적용
-        /// </summary>
-        /// <param name="imagePath">이미지 파일 경로</param>
-        private void LoadImageSafely(string imagePath)
-        {
-            if (!string.IsNullOrEmpty(imagePath) && File.Exists(imagePath))
-            {
-                try
-                {
-                    _backgroundImage?.Dispose();
-                    byte[] imageBytes = File.ReadAllBytes(imagePath);
-                    using (MemoryStream ms = new MemoryStream(imageBytes))
-                    {
-                        _backgroundImage = Image.FromStream(ms);
-                    }
-                    _canvasPanel.Invalidate(); // 강제 다시 그리기 유도 (비율 조정 위함)
-                }
-                catch (OutOfMemoryException)
-                {
-                    // 비정상적인 이미지 크기나 손상된 파일 형식으로 인한 크래시 방지
-                    _backgroundImage = null;
-                }
-                catch (Exception)
-                {
-                    _backgroundImage = null;
-                }
-            }
-        }
+                _workspaceSplit = new SplitContainer { Dock = DockStyle.Fill, SplitterDistance = 250, BackColor = Color.FromArgb(10, 10, 10) };
+                _treeView = new TreeView {Dock = DockStyle.Fill, BackColor = Color.FromArgb(30,30,30), ForeColor = Color.LightGray, BorderStyle = BorderStyle.None, Font=new Font("Consolas", 10), HideSelection=false };
+                _treeView.AfterSelect += TreeView_AfterSelect;
 
-        /// <summary>
-        /// 단일 컨트롤을 생성하고 좌표에 맞춰 캔버스에 추가합니다.
-        /// 하네스 검증 시 발견될 수 있는 문제(경계값 등)를 보정하여 안전하게 생성합니다.
-        /// </summary>
-        private void CreateAndPlaceControl(UIControl ctlInfo)
-        {
-            // 컨트롤 타임을 Button으로 변경하여 명시적인 터치 UI 구성
-            var panelControl = new Button
-            {
-                Name = ctlInfo.Id,
-                Text = ctlInfo.Command,
-                Left = Math.Max(0, ctlInfo.X),
-                Top = Math.Max(0, ctlInfo.Y),
-                Width = Math.Max(10, ctlInfo.W),
-                Height = Math.Max(10, ctlInfo.H),
-                BackColor = Color.FromArgb(0, 122, 204),
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Tag = ctlInfo // 참조 통째로 위임
-            };
+                _canvasSplit = new SplitContainer { Dock = DockStyle.Fill, SplitterDistance = this.Width - 300, BackColor = Color.FromArgb(10, 10, 10) };
+                _propertyGrid = new PropertyGrid { Dock = DockStyle.Fill, PropertySort = PropertySort.Categorized, BackColor = Color.FromArgb(50,50,50), ToolbarVisible = false };
+                _propertyGrid.PropertyValueChanged += PropertyGrid_PropertyValueChanged;
 
-            // 커스텀 클릭 이벤트를 통해 비동기 처리(UI 프리징 완전 방어 규정) 전환
-            panelControl.Click += async (s, e) =>
-            {
-                if (s is Control currentControl && currentControl.Tag is UIControl info)
-                {
-                    try
-                    {
-                        Console.WriteLine($"Button [{info.Id}] Clicked!");
-                        // 하네스 검증 로직 연결: 비동기 위임을 통해 UI 점유율을 늘리지 않고 Network I/O 처리
-                        await GmnPlayer.Managers.DeviceManager.Instance.SendCommandAsync(info.TargetDeviceId, info.Command);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"[Error] Button Click Handler Failed: {ex.Message}");
-                    }
-                }
-            };
+                Panel rightPanel = new Panel { Dock = DockStyle.Fill };
+                _btnIdentify = new Button { Text = "Verify (Blink Hardware)", Dock = DockStyle.Bottom, Height = 40, BackColor = Color.DarkRed, ForeColor=Color.White, FlatStyle = FlatStyle.Flat, Font = new Font("Arial", 9, FontStyle.Bold) };
+                _btnIdentify.Click += BtnIdentify_Click;
 
-            _canvasPanel.Controls.Add(panelControl);
-            panelControl.BringToFront(); // ZIndex 정렬 순서대로 올려집니다.
-        }
+                rightPanel.Controls.Add(_propertyGrid); rightPanel.Controls.Add(_btnIdentify);
 
-        /// <summary>
-        /// 현재 캔버스의 모든 컨트롤 객체를 메모리 누수 없이 제거합니다. (메모리 관리 규정 충족)
-        /// </summary>
-        public void ClearCanvas()
-        {
-            if (_canvasPanel.InvokeRequired)
-            {
-                _canvasPanel.BeginInvoke(new Action(ClearCanvas));
-                return;
-            }
+                _canvasSplit.Panel1.Controls.Add(_canvasPanel); _canvasSplit.Panel2.Controls.Add(rightPanel);
+                _workspaceSplit.Panel1.Controls.Add(_treeView); _workspaceSplit.Panel2.Controls.Add(_canvasSplit);
 
-            _canvasPanel.SuspendLayout();
-            for (int i = _canvasPanel.Controls.Count - 1; i >= 0; i--)
-            {
-                var ctl = _canvasPanel.Controls[i];
-                _canvasPanel.Controls.RemoveAt(i);
-                ctl.Dispose(); // 중요: WinForms 리소스 (GDI+ 핸들 등 정적 자원) 강제 해제
-            }
-            _staticControls.Clear(); // 정적 랜더링 요소 클리어
-            _canvasPanel.ResumeLayout(true);
-        }
-
-        /// <summary>
-        /// Paint 이벤트를 재정의하여 배경 이미지의 유동적인 비율 유지를 처리합니다.
-        /// </summary>
-        private void CanvasPanel_Paint(object? sender, PaintEventArgs e)
-        {
-            Graphics g = e.Graphics;
-
-            if (_backgroundImage == null)
-            {
-                string warnText = "No Background Image";
-                using (Font f = new Font("Arial", 16, FontStyle.Bold))
-                using (StringFormat sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                {
-                    g.DrawString(warnText, f, Brushes.Yellow, _canvasPanel!.ClientRectangle, sf);
-                }
+                // [BUG FIX 2] Dock 레이아웃 배치 붕괴 순서 재조정. 컨트롤 추가 순서에 따라 Z-Index가 정해지므로 역순 구성!
+                this.Controls.Add(_workspaceSplit); // 1. 남는 공간 전부 차지
+                this.Controls.Add(_toolStrip);      // 2. 상단 (MenuBar 아래)
+                this.Controls.Add(_menuStrip);      // 3. 최상단 (제일 위에 렌더링)
+                
+                _workspaceSplit.BringToFront(); // 중앙으로 강제 푸시
+                
+                InitializeResizeHandles();
             }
             else
             {
-                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                this.Controls.Add(_canvasPanel);
+            }
+        }
 
-                // 캔버스 대비 이미지의 비율이 깨지지 않게 유동적 스케일링 (Aspect Ratio 유지 - Letterbox 방식)
-                float ratioX = (float)_canvasPanel.Width / _backgroundImage.Width;
-                float ratioY = (float)_canvasPanel.Height / _backgroundImage.Height;
-                float ratio = Math.Min(ratioX, ratioY);
+        private void PushUndoState()
+        {
+            var cfg = ProjectManager.Instance.CurrentProject;
+            if (cfg != null)
+            {
+                _undoStack.Add(JsonSerializer.Serialize(cfg));
+                if (_undoStack.Count > 20) _undoStack.RemoveAt(0);
+            }
+        }
 
-                int drawWidth = (int)(_backgroundImage.Width * ratio);
-                int drawHeight = (int)(_backgroundImage.Height * ratio);
-                int drawX = (_canvasPanel.Width - drawWidth) / 2;
-                int drawY = (_canvasPanel.Height - drawHeight) / 2;
+        private void PerformUndo()
+        {
+            if (_undoStack.Count > 0)
+            {
+                string prevJson = _undoStack.Last();
+                _undoStack.RemoveAt(_undoStack.Count - 1);
+                
+                LoadLayoutFromJson(prevJson);
+                ProjectManager.Instance.SaveProject();
+                DeselectAll();
+            }
+        }
 
-                g.DrawImage(_backgroundImage, drawX, drawY, drawWidth, drawHeight);
+        private int Snap(int value) => (int)Math.Round(value / 5.0) * 5;
+        
+        private void DeselectAll()
+        {
+            if (_selectedControl != null) _selectedControl.BackColor = _selectedControl.BackColor; // Dummy trigger
+            _selectedControl = null;
+            if (_propertyGrid != null) _propertyGrid.SelectedObject = ProjectManager.Instance.CurrentProject;
+            if (_treeView != null) _treeView.SelectedNode = null;
+            UpdateHandlesPosition();
+        }
+
+        private async void BtnIdentify_Click(object? sender, EventArgs e)
+        {
+            if (_propertyGrid?.SelectedObject is WidgetModel wm && !string.IsNullOrEmpty(wm.TargetDeviceId))
+            {
+                SystemLogger.Info(LogCategory.UI_EVENT, $"Designer Identify Device Triggered on: [{wm.TargetDeviceId}]");
+                await DeviceManager.Instance.IdentifyDeviceAsync(wm.TargetDeviceId);
+            }
+            else
+            {
+                MessageBox.Show("Please select a valid DID Grid Widget or configure TargetDeviceId.", "Identify Blocked");
+            }
+        }
+
+        private void PropertyGrid_PropertyValueChanged(object? s, PropertyValueChangedEventArgs e)
+        {
+            PushUndoState();
+
+            if (_propertyGrid?.SelectedObject is ProjectConfig prjConfig)
+            {
+                if (e.ChangedItem?.Label == "Background Image Path" && !string.IsNullOrEmpty(prjConfig.BackgroundImagePath))
+                {
+                    prjConfig.BackgroundImagePath = AssetManager.CopyAndGetRelativePath(prjConfig.BackgroundImagePath);
+                }
+
+                try
+                {
+                    _canvasPanel.BackColor = ColorTranslator.FromHtml(prjConfig.BackgroundColor);
+                } catch { } // 무효 HTML 코드 방어
+                
+                string absBgPath = AssetManager.GetAbsolutePath(prjConfig.BackgroundImagePath);
+                if (!string.IsNullOrEmpty(absBgPath) && System.IO.File.Exists(absBgPath)) {
+                    _canvasPanel.BackgroundImage = Image.FromFile(absBgPath);
+                    _canvasPanel.BackgroundImageLayout = ImageLayout.Stretch;
+                } else {
+                    _canvasPanel.BackgroundImage = null;
+                }
+            }
+            else if (_propertyGrid?.SelectedObject is WidgetModel model)
+            {
+                if (e.ChangedItem?.Label == "Image Asset Path" && !string.IsNullOrEmpty(model.ImagePath))
+                {
+                    model.ImagePath = AssetManager.CopyAndGetRelativePath(model.ImagePath);
+                }
+
+                var targetControl = _canvasPanel.Controls.OfType<Control>().FirstOrDefault(c => c.Name == model.Id);
+                if (targetControl != null)
+                {
+                    // [BUG FIX 3] PropertyGrid에서 Row/Col 등을 변경했을 경우, 자식 셀 데이터가 갱신 안되는 문제 해결.
+                    // 위젯을 폐기하고 즉시 재생성하여 캔버스에 다시 부착!
+                    if (model.Type == WidgetType.GridCanvas || model.Type == WidgetType.SourceList)
+                    {
+                        var isSelected = _selectedControl == targetControl;
+                        _canvasPanel.Controls.Remove(targetControl);
+                        targetControl.Dispose();
+                        
+                        CreateAndPlaceControl(model);
+                        var newControl = _canvasPanel.Controls.OfType<Control>().FirstOrDefault(c => c.Name == model.Id);
+                        if (newControl != null && isSelected) SelectControl(newControl, model);
+                    }
+                    else
+                    {
+                        UpdateControlVisuals(targetControl, model);
+                    }
+                    
+                    UpdateHandlesPosition();
+                    RefreshTreeViewNames();
+                }
+            }
+            ProjectManager.Instance.SaveProject(); 
+        }
+
+        private void TreeView_AfterSelect(object? sender, TreeViewEventArgs e)
+        {
+            if (e.Node?.Tag is WidgetModel model)
+            {
+                var targetControl = _canvasPanel.Controls.OfType<Control>().FirstOrDefault(c => c.Name == model.Id);
+                if (targetControl != null) SelectControl(targetControl, model);
+            }
+        }
+
+        private void SelectControl(Control ctl, WidgetModel model)
+        {
+            _selectedControl = ctl;
+            if (_propertyGrid != null) _propertyGrid.SelectedObject = model;
+            
+            if (_treeView != null)
+            {
+                foreach(TreeNode node in _treeView.Nodes)
+                {
+                    if (node.Tag == model) { _treeView.SelectedNode = node; break; }
+                }
+            }
+            UpdateHandlesPosition();
+        }
+
+        private void AddWidgetFromPalette(WidgetType type)
+        {
+            var config = ProjectManager.Instance.CurrentProject;
+            if (config != null)
+            {
+                PushUndoState();
+                var newWidget = new WidgetModel { Type = type, X = 50, Y = 50, W = 150, H = 100, ZIndex=100, Id = "NEW_" + type.ToString() + "_" + Guid.NewGuid().ToString().Substring(0,4) };
+                if(type == WidgetType.GridCanvas) { newWidget.W = 400; newWidget.H = 300; }
+                
+                config.Widgets.Add(newWidget);
+                ProjectManager.Instance.SaveProject();
+                
+                CreateAndPlaceControl(newWidget);
+                string alias = string.IsNullOrEmpty(newWidget.Command) ? newWidget.Id : newWidget.Command;
+                if (_treeView != null) _treeView.Nodes.Add(new TreeNode($"[{newWidget.Type}] {alias}") { Tag = newWidget });
+                
+                var ctl = _canvasPanel.Controls.OfType<Control>().FirstOrDefault(c => c.Name == newWidget.Id);
+                if (ctl != null) SelectControl(ctl, newWidget);
+            }
+        }
+
+        private void LayoutEngine_KeyDown(object? sender, KeyEventArgs e)
+        {
+            if (e.Control && e.Alt && e.KeyCode == Keys.D)
+            {
+                MessageBox.Show("Maintenance Gate Activated.\nPlease restart the application to toggle modes if auto-start intercepts.", "Mode Switcher");
+                return;
             }
 
-            // GDI 핸들 최적화 대상: Panel 인스턴스를 무한정 띄우지 않고, 정적 자원은 Graphics API로 직접 그림.
-            if (_staticControls.Count > 0)
+            if (CurrentMode == EngineMode.Designer)
             {
-                using (Pen guidePen = new Pen(Color.FromArgb(180, 200, 200, 200), 2))
+                if (e.KeyCode == Keys.Escape) DeselectAll();
+                
+                // [Ctrl+C] Copy
+                if (e.Control && e.KeyCode == Keys.C && _selectedControl != null)
                 {
-                    foreach (var sc in _staticControls)
+                    _clipboard.Clear();
+                    var widget = ProjectManager.Instance.CurrentProject?.Widgets.FirstOrDefault(w => w.Id == _selectedControl.Name);
+                    if (widget != null) {
+                        string copyJson = JsonSerializer.Serialize(widget);
+                        _clipboard.Add(JsonSerializer.Deserialize<WidgetModel>(copyJson)!);
+                        SystemLogger.Info(LogCategory.UI_EVENT, $"Widget '{widget.Id}' copied to clipboard.");
+                    }
+                }
+                
+                // [Ctrl+V] Paste
+                if (e.Control && e.KeyCode == Keys.V && _clipboard.Count > 0)
+                {
+                    PushUndoState();
+                    var config = ProjectManager.Instance.CurrentProject;
+                    foreach (var model in _clipboard)
                     {
-                        g.DrawRectangle(guidePen, sc.X, sc.Y, sc.W, sc.H);
+                        var newClone = JsonSerializer.Deserialize<WidgetModel>(JsonSerializer.Serialize(model))!;
+                        newClone.Id = "NEW_" + newClone.Type.ToString() + "_" + Guid.NewGuid().ToString().Substring(0, 4);
+                        newClone.X += 20;
+                        newClone.Y += 20;
+                        config?.Widgets.Add(newClone);
+                        CreateAndPlaceControl(newClone);
+                        
+                        string alias = string.IsNullOrEmpty(newClone.Command) ? newClone.Id : newClone.Command;
+                        if (_treeView != null) _treeView.Nodes.Add(new TreeNode($"[{newClone.Type}] {alias}") { Tag = newClone });
+                        
+                        var ctl = _canvasPanel.Controls.OfType<Control>().FirstOrDefault(c => c.Name == newClone.Id);
+                        if (ctl != null) SelectControl(ctl, newClone);
+                    }
+                    ProjectManager.Instance.SaveProject();
+                }
+
+                if (e.Control && e.KeyCode == Keys.Z) PerformUndo();
+                if (e.KeyCode == Keys.Delete && _selectedControl != null)
+                {
+                    PushUndoState();
+                    string id = _selectedControl.Name;
+                    var widget = ProjectManager.Instance.CurrentProject?.Widgets.FirstOrDefault(w => w.Id == id);
+                    if (widget != null) ProjectManager.Instance.CurrentProject?.Widgets.Remove(widget);
+                    ProjectManager.Instance.SaveProject();
+                    
+                    _canvasPanel.Controls.Remove(_selectedControl);
+                    _selectedControl.Dispose();
+                    DeselectAll();
+                    RefreshTreeNodesWhole();
+                }
+                
+                if (e.Control && (e.KeyCode == Keys.Up || e.KeyCode == Keys.Down) && _selectedControl != null)
+                {
+                    PushUndoState();
+                    var widget = ProjectManager.Instance.CurrentProject?.Widgets.FirstOrDefault(w => w.Id == _selectedControl.Name);
+                    if (widget != null)
+                    {
+                        if (e.KeyCode == Keys.Up) { widget.ZIndex += 1; _selectedControl.BringToFront(); }
+                        if (e.KeyCode == Keys.Down) { widget.ZIndex -= 1; _selectedControl.SendToBack(); }
+                        ProjectManager.Instance.SaveProject();
+                        UpdateHandlesPosition();
                     }
                 }
             }
         }
 
-        /// <summary>
-        /// 화면 리사이징 시 패널 다시 그리기를 유도합니다.
-        /// </summary>
-        private void CanvasPanel_Resize(object? sender, EventArgs e)
+        private void RefreshTreeNodesWhole()
         {
-            _canvasPanel.Invalidate();
-        }
-
-        /// <summary>
-        /// 시각적 시뮬레이터(Quick Start) 환경 조성을 위해 임시 JSON을 주입하고 화면을 구성합니다.
-        /// </summary>
-        public void LoadMockProject()
-        {
-            var config = new ProjectConfig { ProjectId = "mock_project_01" };
-            
-            // 디바이스 모킹 추가 (Timeout 등을 테스트하기 위해 유효한 IP, 가상 포트 연동)
-            config.DeviceNodes.Add(new DeviceNode { DeviceId = "DEV_01", IpAddress = "127.0.0.1", Port = 5000 });
-            config.DeviceNodes.Add(new DeviceNode { DeviceId = "DEV_02", IpAddress = "127.0.0.1", Port = 5001 });
-
-            // 5개의 동적 버튼 설정
-            string[] btnTitles = { "CCTV 1", "Power ON", "Light OFF", "Alarm Reset", "System Halt" };
-            for (int i = 0; i < 5; i++)
+            if (_treeView == null) return;
+            _treeView.Nodes.Clear();
+            var config = ProjectManager.Instance.CurrentProject;
+            if (config != null)
             {
-                config.UIControls.Add(new UIControl
+                var sorted = config.Widgets.OrderBy(w => w.ZIndex).ToList();
+                foreach(var w in sorted)
                 {
-                    Id = $"btn_mock_{i}",
-                    X = 50 + (i * 120), Y = 100, W = 100, H = 50,
-                    Command = btnTitles[i], // command로 타이틀 활용
-                    TargetDeviceId = "DEV_01",
-                    IsStatic = false,
-                    ZIndex = i
-                });
+                    string alias = string.IsNullOrEmpty(w.Command) ? w.Id : w.Command;
+                    _treeView.Nodes.Add(new TreeNode($"[{w.Type}] {alias}") { Tag = w });
+                }
+            }
+        }
+
+        private void LoadLayoutFromJson(string jsonContent)
+        {
+            if (string.IsNullOrWhiteSpace(jsonContent)) return;
+
+            try
+            {
+                var config = JsonSerializer.Deserialize<ProjectConfig>(jsonContent);
+                if (config != null)
+                {
+                    ProjectManager.Instance.CurrentProject = config; // BUG FIX: Synchronize the global state with the rendering context
+                    ClearCanvas();
+                    if (_treeView != null) _treeView.Nodes.Clear();
+
+                    try { _canvasPanel.BackColor = ColorTranslator.FromHtml(config.BackgroundColor); } catch {}
+                    string absBgPath = AssetManager.GetAbsolutePath(config.BackgroundImagePath);
+                    if (!string.IsNullOrEmpty(absBgPath) && System.IO.File.Exists(absBgPath)) {
+                        _canvasPanel.BackgroundImage = Image.FromFile(absBgPath);
+                        _canvasPanel.BackgroundImageLayout = ImageLayout.Stretch;
+                    }
+
+                    var sortedWidgets = config.Widgets.OrderBy(w => w.ZIndex).ToList();
+                    foreach (var widgetInfo in sortedWidgets)
+                    {
+                        CreateAndPlaceControl(widgetInfo);
+                        if (_treeView != null)
+                        {
+                            string alias = string.IsNullOrEmpty(widgetInfo.Command) ? widgetInfo.Id : widgetInfo.Command;
+                            _treeView.Nodes.Add(new TreeNode($"[{widgetInfo.Type}] {alias}") { Tag = widgetInfo });
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                SystemLogger.Error(LogCategory.SYSTEM, "Failed to parse Layout JSON.", ex);
+            }
+        }
+
+        private void RefreshTreeViewNames()
+        {
+            if (_treeView == null) return;
+            foreach(TreeNode node in _treeView.Nodes)
+            {
+                if (node.Tag is WidgetModel m)
+                {
+                    string alias = string.IsNullOrEmpty(m.Command) ? m.Id : m.Command;
+                    node.Text = $"[{m.Type}] {alias}";
+                }
+            }
+        }
+
+        private void UpdateControlVisuals(Control c, WidgetModel model)
+        {
+            c.Left = Math.Max(0, model.X);
+            c.Top = Math.Max(0, model.Y);
+            c.Width = Math.Max(10, model.W);
+            c.Height = Math.Max(10, model.H);
+
+            if (c is Button btn && model.Type == WidgetType.Button) btn.Text = model.Command;
+            if (c is Button layoutBtn && model.Type == WidgetType.LayoutChanger) layoutBtn.Text = model.Command;
+
+            string absImgPath = AssetManager.GetAbsolutePath(model.ImagePath);
+            if (!string.IsNullOrEmpty(absImgPath) && System.IO.File.Exists(absImgPath)) {
+                c.BackgroundImage = Image.FromFile(absImgPath);
+                c.BackgroundImageLayout = ImageLayout.Stretch;
+            } else {
+                c.BackgroundImage = null;
             }
 
-            // 정적 부하 테스트용 백그라운드 프레임 하나 추가
-            config.UIControls.Add(new UIControl { Id = "guide_1", X = 40, Y = 40, W = 620, H = 70, IsStatic = true });
+            c.Invalidate();
+            c.Update(); 
+            _canvasPanel.Refresh(); 
+        }
 
-            string json = JsonSerializer.Serialize(config);
+        private void CreateAndPlaceControl(WidgetModel ctlInfo)
+        {
+            Control panelControl;
+            switch(ctlInfo.Type)
+            {
+                case WidgetType.GridCanvas: panelControl = CreateGridCanvas(ctlInfo); break;
+                case WidgetType.SourceList: panelControl = CreateSourceList(ctlInfo); break;
+                case WidgetType.LayoutChanger: panelControl = CreateLayoutChanger(ctlInfo); break;
+                case WidgetType.PresetMinimap: panelControl = CreatePresetMinimap(ctlInfo); break;
+                case WidgetType.Button:
+                default: panelControl = CreateButton(ctlInfo); break;
+            }
+
+            if (CurrentMode == EngineMode.Designer) AttachDesignerEvents(panelControl, ctlInfo);
+
+            _canvasPanel.Controls.Add(panelControl);
+            panelControl.BringToFront(); 
+        }
+
+        private void AttachDesignerEvents(Control ctl, WidgetModel info)
+        {
+            ctl.MouseDown += (s, e) => HandleControlMouseDown(ctl, info, e);
+            ctl.MouseMove += (s, e) => HandleControlMouseMove(ctl, e);
+            ctl.MouseUp += (s, e) => HandleControlMouseUp(ctl, e);
             
-            // 런타임에 디바이스 매니저 장비 세팅 연동 완료
-            GmnPlayer.Managers.DeviceManager.Instance.InitializeFromConfig(config);
+            foreach(Control child in ctl.Controls)
+            {
+                child.MouseDown += (s, e) => { HandleControlMouseDown(ctl, info, e); };
+                child.MouseMove += (s, e) => { HandleControlMouseMove(ctl, e); };
+                child.MouseUp += (s, e) => { HandleControlMouseUp(ctl, e); };
 
-            LoadLayoutFromJson(json);
+                if (info.Type == WidgetType.SourceList) child.DoubleClick += (s, e) => OpenSourceWizard(info);
+            }
+            if (info.Type == WidgetType.SourceList) ctl.DoubleClick += (s, e) => OpenSourceWizard(info);
         }
 
-        /// <summary>
-        /// 리소스 해제 (IDisposable 구현 - IDisposable 객체 반드시 해제 규정 충족)
-        /// </summary>
-        public new void Dispose()
+        private void HandleControlMouseDown(Control parent, WidgetModel info, MouseEventArgs e)
         {
-            ClearCanvas();
-            if (_backgroundImage != null)
+            if (e.Button == MouseButtons.Left)
             {
-                _backgroundImage.Dispose();
-                _backgroundImage = null;
+                PushUndoState();
+                SelectControl(parent, info);
+                _isDragging = true;
+                _dragStartCursor = Cursor.Position;
+                _dragStartLocation = parent.Location;
             }
-            if (_canvasPanel != null)
-            {
-                _canvasPanel.Dispose();
-            }
-            base.Dispose();
         }
-    }
-
-    /// <summary>
-    /// 화면 깜빡임 개선(Double Buffering)을 위한 커스텀 패널.
-    /// 네이티브 성능 극대화를 위한 최적화 기법 - 컨트롤 렌더링 오버헤드 최소화.
-    /// </summary>
-    public class DoubleBufferedPanel : Panel
-    {
-        public DoubleBufferedPanel()
+        
+        private void HandleControlMouseMove(Control parent, MouseEventArgs e)
         {
-            // WinForms 내부 API를 다이렉트로 호출하여 더블 버퍼링 활성화, 그리기 지연 극소화
-            this.DoubleBuffered = true;
-            this.SetStyle(ControlStyles.AllPaintingInWmPaint |
-                          ControlStyles.UserPaint |
-                          ControlStyles.OptimizedDoubleBuffer, true);
-            this.UpdateStyles();
+            if (_isDragging && _selectedControl == parent)
+            {
+                Point cur = Cursor.Position;
+                int dx = cur.X - _dragStartCursor.X;
+                int dy = cur.Y - _dragStartCursor.Y;
+                
+                parent.Left = Snap(Math.Max(0, _dragStartLocation.X + dx));
+                parent.Top = Snap(Math.Max(0, _dragStartLocation.Y + dy));
+                
+                UpdateHandlesPosition();
+            }
+        }
+
+        private void HandleControlMouseUp(Control parent, MouseEventArgs e)
+        {
+            if (_isDragging) { _isDragging = false; UpdateModelFromControlBounds(); }
+        }
+
+        private void InitializeResizeHandles()
+        {
+            Cursor[] handleCursors = { Cursors.SizeNWSE, Cursors.SizeNS, Cursors.SizeNESW, Cursors.SizeWE, Cursors.SizeWE, Cursors.SizeNESW, Cursors.SizeNS, Cursors.SizeNWSE };
+            for (int i = 0; i < 8; i++)
+            {
+                var handle = new Panel
+                {
+                    Size = new Size(10, 10),BackColor = Color.Cyan, BorderStyle = BorderStyle.FixedSingle,
+                    Cursor = handleCursors[i], Visible = false, Tag = i
+                };
+                
+                handle.MouseDown += ResizeHandle_MouseDown;
+                handle.MouseMove += ResizeHandle_MouseMove;
+                handle.MouseUp += ResizeHandle_MouseUp;
+                
+                _resizeHandles.Add(handle);
+                _canvasPanel.Controls.Add(handle);
+            }
+        }
+
+        private void UpdateHandlesPosition()
+        {
+            if (_selectedControl == null) { foreach (var h in _resizeHandles) h.Visible = false; return; }
+
+            Rectangle b = _selectedControl.Bounds;
+            int hw = 5; 
+            
+            Point[] pts = {
+                new Point(b.Left - hw, b.Top - hw), new Point(b.Left + b.Width/2 - hw, b.Top - hw), new Point(b.Right - hw, b.Top - hw),
+                new Point(b.Left - hw, b.Top + b.Height/2 - hw), new Point(b.Right - hw, b.Top + b.Height/2 - hw),
+                new Point(b.Left - hw, b.Bottom - hw), new Point(b.Left + b.Width/2 - hw, b.Bottom - hw), new Point(b.Right - hw, b.Bottom - hw)
+            };
+
+            for (int i = 0; i < 8; i++)
+            {
+                _resizeHandles[i].Location = pts[i];
+                _resizeHandles[i].Visible = true;
+                _resizeHandles[i].BringToFront(); 
+            }
+        }
+
+        private void ResizeHandle_MouseDown(object? sender, MouseEventArgs e)
+        {
+            if (sender is Panel handle && _selectedControl != null)
+            {
+                PushUndoState();
+                handle.Capture = true; // [BUG FIX] 리사이징 도중 커서를 크게 벗어나면 컨트롤을 잃어버리는 현상 보완
+                _isResizing = true;
+                _resizeHandleIndex = handle.Tag != null ? (int)handle.Tag : -1;
+                _dragStartCursor = Cursor.Position;
+                _resizeStartBounds = _selectedControl.Bounds;
+            }
+        }
+
+        private void ResizeHandle_MouseMove(object? sender, MouseEventArgs e)
+        {
+            if (_isResizing && _selectedControl != null)
+            {
+                Point cur = Cursor.Position;
+                int dx = cur.X - _dragStartCursor.X;
+                int dy = cur.Y - _dragStartCursor.Y;
+                Rectangle n = _resizeStartBounds;
+
+                switch (_resizeHandleIndex)
+                {
+                    case 0: n.X += dx; n.Width -= dx; n.Y += dy; n.Height -= dy; break;
+                    case 1: n.Y += dy; n.Height -= dy; break;
+                    case 2: n.Width += dx; n.Y += dy; n.Height -= dy; break;
+                    case 3: n.X += dx; n.Width -= dx; break;
+                    case 4: n.Width += dx; break;
+                    case 5: n.X += dx; n.Width -= dx; n.Height += dy; break;
+                    case 6: n.Height += dy; break;
+                    case 7: n.Width += dx; n.Height += dy; break;
+                }
+
+                n.X = Snap(n.X); n.Y = Snap(n.Y); n.Width = Snap(n.Width); n.Height = Snap(n.Height);
+
+                if (n.Width > 10 && n.Height > 10) { _selectedControl.Bounds = n; UpdateHandlesPosition(); }
+            }
+        }
+
+        private void ResizeHandle_MouseUp(object? sender, MouseEventArgs e)
+        {
+            if (_isResizing)
+            {
+                _isResizing = false;
+                if (sender is Panel handle) handle.Capture = false;
+                UpdateModelFromControlBounds();
+                
+                // 만약 현재 객체가 그리드 캔버스라면 자식들을 내부 규격에 맞게 리사이징함
+                if (_selectedControl is Panel pnl && _propertyGrid?.SelectedObject is WidgetModel wm && wm.Type == WidgetType.GridCanvas)
+                {
+                    int cw = pnl.Width / Math.Max(1, wm.GridCols);
+                    int ch = pnl.Height / Math.Max(1, wm.GridRows);
+                    foreach(Control child in pnl.Controls)
+                    {
+                        if(child.Name.Contains("_R"))
+                        {
+                            var parts = child.Name.Split('_');
+                            int _r = int.Parse(parts[parts.Length-2].Replace("R",""));
+                            int _c = int.Parse(parts.Last().Replace("C",""));
+                            child.Left = _c * cw; child.Top = _r * ch; child.Width = cw-1; child.Height = ch-1;
+                        }
+                    }
+                }
+            }
+        }
+
+        private void UpdateModelFromControlBounds()
+        {
+            if (_selectedControl != null && _propertyGrid?.SelectedObject is WidgetModel model)
+            {
+                model.X = _selectedControl.Left; model.Y = _selectedControl.Top;
+                model.W = _selectedControl.Width; model.H = _selectedControl.Height;
+                
+                _propertyGrid.Refresh(); ProjectManager.Instance.SaveProject();
+            }
+        }
+
+        private void ClearCanvas()
+        {
+            var widgetControls = _canvasPanel.Controls.OfType<Control>().Where(c => !_resizeHandles.Contains(c)).ToList();
+            foreach (Control c in widgetControls) c.Dispose();
+            _selectedControl = null;
+            UpdateHandlesPosition();
+        }
+
+        private void OpenSourceWizard(WidgetModel model)
+        {
+            Form wizard = new Form { Width = 400, Height = 250, Text = "Source Registration Wizard", StartPosition = FormStartPosition.CenterScreen, FormBorderStyle = FormBorderStyle.FixedDialog };
+            
+            Label lId = new Label { Text = "Source ID (ex: PC_05):", Left=20, Top=20, Width=150 };
+            TextBox txtId = new TextBox { Left=20, Top=40, Width=340 };
+            
+            Label lAlias = new Label { Text = "Source Alias (ex: Server C):", Left=20, Top=80, Width=150 };
+            TextBox txtAlias = new TextBox { Left=20, Top=100, Width=340 };
+            
+            Button btnAdd = new Button { Text = "Add Item", Left=260, Top=150, Width=100, BackColor=Color.DarkGreen, ForeColor=Color.White, DialogResult = DialogResult.OK };
+            
+            wizard.Controls.Add(lId); wizard.Controls.Add(txtId);
+            wizard.Controls.Add(lAlias); wizard.Controls.Add(txtAlias);
+            wizard.Controls.Add(btnAdd); wizard.AcceptButton = btnAdd;
+
+            if (wizard.ShowDialog() == DialogResult.OK && !string.IsNullOrEmpty(txtId.Text))
+            {
+                PushUndoState();
+                model.SourceItems.Add(new SourceItemNode { Id = txtId.Text, Alias = txtAlias.Text });
+                ProjectManager.Instance.SaveProject();
+                
+                ClearCanvas(); 
+                LoadLayoutFromJson(JsonSerializer.Serialize(ProjectManager.Instance.CurrentProject));
+                DeselectAll(); 
+            }
+        }
+
+        private Control CreateButton(WidgetModel info)
+        {
+            var btn = new Button
+            {
+                Name = info.Id, Text = info.Command, Left = Math.Max(0, info.X), Top = Math.Max(0, info.Y),
+                Width = Math.Max(10, info.W), Height = Math.Max(10, info.H),
+                BackColor = Color.FromArgb(0, 122, 204), ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Tag = info 
+            };
+
+            if (CurrentMode == EngineMode.Player)
+            {
+                btn.Click += async (s, e) =>
+                {
+                    if (s is Control && info != null)
+                        await DeviceManager.Instance.SendCommandAsync(info.TargetDeviceId, info.Command);
+                };
+            }
+            return btn;
+        }
+
+        private Control CreateGridCanvas(WidgetModel info)
+        {
+            var gridPanel = new Panel
+            {
+                Name = info.Id, Left = Math.Max(0, info.X), Top = Math.Max(0, info.Y), Width = Math.Max(10, info.W), Height = Math.Max(10, info.H),
+                BackColor = Color.FromArgb(40, 40, 40), BorderStyle = BorderStyle.FixedSingle, Tag = info
+            };
+
+            int rows = Math.Max(1, info.GridRows);
+            int cols = Math.Max(1, info.GridCols);
+            int cellW = info.W / cols;
+            int cellH = info.H / rows;
+
+            for (int r = 0; r < rows; r++)
+            {
+                for (int c = 0; c < cols; c++)
+                {
+                    var cell = new Label
+                    {
+                        Name = $"{info.Id}_R{r}_C{c}", Text = $"Cell [{r},{c}]",
+                        Left = c * cellW, Top = r * cellH, Width = cellW - 1, Height = cellH - 1,
+                        BackColor = Color.FromArgb(60, 60, 60), ForeColor = Color.LightGray,
+                        TextAlign = ContentAlignment.MiddleCenter, AllowDrop = true, BorderStyle = BorderStyle.FixedSingle
+                    };
+
+                    if (CurrentMode == EngineMode.Player)
+                    {
+                        int closureRow = r; int closureCol = c;
+                        cell.DoubleClick += async (s, e) => await DeviceManager.Instance.IdentifyDeviceAsync(info.TargetDeviceId);
+                        cell.DragEnter += (s, e) => e.Effect = e.Data!.GetDataPresent(typeof(SourceItemNode)) ? DragDropEffects.Copy : DragDropEffects.None;
+                        cell.DragDrop += async (s, e) =>
+                        {
+                            if (e.Data!.GetData(typeof(SourceItemNode)) is SourceItemNode data)
+                            {
+                                cell.Text = data.Alias; cell.BackColor = Color.FromArgb(0, 100, 150);
+                                await DeviceManager.Instance.SendCommandAsync(info.TargetDeviceId, $"MUX_{data.Id}_R{closureRow}_C{closureCol}");
+                            }
+                        };
+                    }
+                    gridPanel.Controls.Add(cell);
+                }
+            }
+            return gridPanel;
+        }
+
+        private Control CreateLayoutChanger(WidgetModel info)
+        {
+            var btn = new Button
+            {
+                Name = info.Id, Text = info.Command, Left = Math.Max(0, info.X), Top = Math.Max(0, info.Y),
+                Width = Math.Max(10, info.W), Height = Math.Max(10, info.H),
+                BackColor = Color.FromArgb(100, 50, 50), ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Tag = info 
+            };
+
+            if (CurrentMode == EngineMode.Player)
+            {
+                btn.Click += (s, e) =>
+                {
+                    var parts = info.Command.Split('_');
+                    if (parts.Length == 3 && parts[0] == "RESIZE")
+                    {
+                        var config = ProjectManager.Instance.CurrentProject;
+                        var targetGrid = config?.Widgets.FirstOrDefault(w => w.Type == WidgetType.GridCanvas && w.TargetDeviceId == info.TargetDeviceId);
+                        if(targetGrid != null)
+                        {
+                            targetGrid.GridRows = int.Parse(parts[1]); targetGrid.GridCols = int.Parse(parts[2]);
+                            ProjectManager.Instance.SaveProject(); LoadLayoutFromJson(JsonSerializer.Serialize(config));
+                        }
+                    }
+                };
+            }
+            return btn;
+        }
+
+        private Control CreateSourceList(WidgetModel info)
+        {
+            var flowPanel = new FlowLayoutPanel
+            {
+                Name = info.Id, Left = Math.Max(0, info.X), Top = Math.Max(0, info.Y), Width = Math.Max(10, info.W), Height = Math.Max(10, info.H),
+                BackColor = Color.FromArgb(30, 30, 30), AutoScroll = true, Tag = info
+            };
+
+            foreach (var src in info.SourceItems)
+            {
+                var srcLabel = new Label
+                {
+                    Text = src.Alias, Width = info.W - 25, Height = 40, BackColor = Color.FromArgb(50, 50, 50), ForeColor = Color.White,
+                    TextAlign = ContentAlignment.MiddleCenter, Margin = new Padding(5)
+                };
+
+                if (CurrentMode == EngineMode.Player)
+                {
+                    srcLabel.MouseDown += (s, e) => srcLabel.DoDragDrop(src, DragDropEffects.Copy);
+                    srcLabel.DoubleClick += (s, e) =>
+                    {
+                        Form prompt = new Form { Width = 350, Height = 180, FormBorderStyle = FormBorderStyle.FixedDialog, Text = "Rename Alias", StartPosition = FormStartPosition.CenterScreen };
+                        TextBox textBox = new TextBox { Left = 20, Top = 50, Width = 290, Text = src.Alias };
+                        Button confirmation = new Button { Text = "Ok", Left = 210, Top = 90, Width = 100, DialogResult = DialogResult.OK };
+                        prompt.Controls.Add(new Label { Left=20,Top=20,Text="New Alias:" }); prompt.Controls.Add(textBox); prompt.Controls.Add(confirmation); prompt.AcceptButton = confirmation;
+
+                        if (prompt.ShowDialog() == DialogResult.OK) { src.Alias = textBox.Text; srcLabel.Text = src.Alias; ProjectManager.Instance.SaveProject(); }
+                    };
+                }
+                flowPanel.Controls.Add(srcLabel);
+            }
+            return flowPanel;
+        }
+
+        private Control CreatePresetMinimap(WidgetModel info)
+        {
+            var pnl = new Panel { Name = info.Id, Left = Math.Max(0, info.X), Top = Math.Max(0, info.Y), Width = Math.Max(10, info.W), Height = Math.Max(10, info.H), BackColor = Color.Black, BorderStyle = BorderStyle.Fixed3D, Tag = info };
+            
+            pnl.Paint += (s, e) =>
+            {
+                var g = e.Graphics; var grid = ProjectManager.Instance.CurrentProject?.Widgets.FirstOrDefault(w => w.Type == WidgetType.GridCanvas);
+                if(grid != null)
+                {
+                    float cw = pnl.Width / (float)Math.Max(1, grid.GridCols); float ch = pnl.Height / (float)Math.Max(1, grid.GridRows);
+                    using var pen = new Pen(Color.Lime, 2f);
+                    for(int i = 0; i < grid.GridRows; i++) for(int j = 0; j < grid.GridCols; j++) g.DrawRectangle(pen, j * cw, i * ch, cw, ch);
+                    g.DrawString($"Layout: {grid.GridRows}x{grid.GridCols}", new Font("Arial", 10), Brushes.White, 5, 5);
+                }
+            };
+            
+            pnl.Resize += (s, e) => pnl.Invalidate();
+            if (CurrentMode == EngineMode.Player) pnl.Click += async (s, e) => await PresetManager.Instance.ExecutePresetAsync(new PresetState { Name = "Full Restore" });
+            
+            return pnl;
         }
     }
 }
