@@ -1,0 +1,4 @@
+D:\프로젝트\IPROPHETA\obj\Debug\net10.0\IPROPHETA.GeneratedMSBuildEditorConfig.editorconfig
+D:\프로젝트\IPROPHETA\obj\Debug\net10.0\IPROPHETA.AssemblyInfoInputs.cache
+D:\프로젝트\IPROPHETA\obj\Debug\net10.0\IPROPHETA.AssemblyInfo.cs
+D:\프로젝트\IPROPHETA\obj\Debug\net10.0\IPROPHETA.csproj.CoreCompileInputs.cache
